@@ -14,8 +14,16 @@ solver_alpha1: 1.0
 solver_alpha2: 1.0
 solver_sigma1: 50.0
 solver_sigma2: 5.0
-refine_iter: 10 # iterations of solver
-pretrained_mvdn: "./pretrain/checkpoint.pth.tar"
+refine_iter: 25 # iterations of solver
+# nslpon
+prop_kernel: 3
+num_neighbors: 8
+affinity: 'TGASS'
+conf_prop: True
+affinity_gamma: 0.5
+preserve_input: False
+prop_time: 25 # iterations of solver
 
+# pretrained_mvdn: "./pretrain/checkpoint.pth.tar"
 
-
+pretrained_mvdn: "/home/jty/mvs/idn-solver/results/stage1/checkpoints/checkpoint.pth.tar"

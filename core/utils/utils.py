@@ -75,7 +75,7 @@ def tensor2array(tensor, max_value=255, colormap='rainbow'):
 
 
 def save_checkpoint(save_path, dpsnet_state, epoch, filename='checkpoint.pth.tar', file_prefixes = ['dpsnet']):
-    if not os.path.exists(save_path):
+    if not os.path.exists(save_path): 
         os.makedirs(save_path)
     states = [dpsnet_state]
     for (prefix, state) in zip(file_prefixes, states):

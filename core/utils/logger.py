@@ -1,6 +1,7 @@
 from blessings import Terminal
 import progressbar
 import sys
+from prettytable import PrettyTable
 
 
 class TermLogger(object):
@@ -66,24 +67,35 @@ class AverageMeter(object):
         self.meters = i
         self.precision = precision
         self.reset(self.meters)
+        self.meatric = ['abs_rel', 'abs_diff', 'sq_rel', 'rms', 'log_rms', 'a1', 'a2', 'a3']
 
     def reset(self, i):
         self.val = [0]*i
         self.avg = [0]*i
         self.sum = [0]*i
-        self.count = 0
+        self._count = 0
 
     def update(self, val, n=1):
         if not isinstance(val, list):
             val = [val]
         assert(len(val) == self.meters)
-        self.count += n
+        self._count += n
         for i,v in enumerate(val):
             self.val[i] = v
             self.sum[i] += v * n
-            self.avg[i] = self.sum[i] / self.count
+            self.avg[i] = self.sum[i] / self._count
 
     def __repr__(self):
         val = ' '.join(['{:.{}f}'.format(v, self.precision) for v in self.val])
         avg = ' '.join(['{:.{}f}'.format(a, self.precision) for a in self.avg])
         return '{} ({})'.format(val, avg)
+
+    def show_avgerrors(self):
+        # from pdb import set_trace; set_trace()
+        table = PrettyTable(["key","value"])
+        table.align["key"] = "l"
+        table.padding_width = 1
+        table.add_row(['_count', self._count] )
+        for i, key in enumerate(self.meatric):
+            table.add_row([key, '%.4f' % self.avg[i]] )
+        print(table)

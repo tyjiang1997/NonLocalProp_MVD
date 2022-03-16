@@ -2,10 +2,7 @@ from __future__ import division
 import torch
 import random
 import numpy as np
-from scipy.misc import imresize
-from scipy.ndimage.interpolation import zoom
 import skimage
-from skimage import transform
 import time
 import cv2
 '''Set of tranform random routines that takes list of inputs as arguments,

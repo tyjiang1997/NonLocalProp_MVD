@@ -6,10 +6,13 @@ import torch
 import torch.backends.cudnn as cudnn
 from core.networks.MVDNet_conf import MVDNet_conf
 from core.networks.solver import Solver
+# from core.networks.solveroff import Solver
+
 from post_processing.calConfidence import calConf
 from core.utils.utils import load_config_file, vis_depth, vis_normal
 from core.networks.loss_functions import compute_errors_numpy
 from core.utils.logger import AverageMeter
+import path
 
 def resize_intr(K, raw_hw, new_hw):
     new_K = np.copy(K)
@@ -46,7 +49,7 @@ def read_folder(path, input_size=(480,640)):
         img = cv2.cvtColor(cv2.imread(os.path.join(img_dir, img_name)), cv2.COLOR_BGR2RGB).astype(np.float)
         raw_hw = img.shape[:2]
         img = cv2.resize(img, (input_size[1], input_size[0]))
-        depth = cv2.imread(os.path.join(depth_dir, depth_name), -1) / 1000.0
+        depth = np.load(os.path.join(depth_dir, depth_name)).astype(np.float32) / 1000.0
         assert depth.shape[0] == input_size[0]
         assert depth.shape[1] == input_size[1]
         pose = np.loadtxt(os.path.join(pose_dir, pose_name))
@@ -55,6 +58,45 @@ def read_folder(path, input_size=(480,640)):
         poses.append(pose)
     intrinsics = np.loadtxt(os.path.join(K_dir, "intrinsic_depth.txt"))[:3,:3]
     return imgs, depths, poses, intrinsics
+
+
+def generate_pointcloud(rgb, depth, ply_file, intr, scale=1.0):
+    """
+    Generate a colored point cloud in PLY format from a color and a depth image.
+
+    Input:
+    rgb_file -- filename of color image
+    depth_file -- filename of depth image
+    ply_file -- filename of ply file
+
+    """
+    fx, fy, cx, cy = intr[0, 0], intr[1, 1], intr[0, 2], intr[1, 2]
+    points = []
+    # from pdb import set_trace; set_trace()
+    for v in range(rgb.shape[0]):
+        for u in range(rgb.shape[1]):
+            color = rgb[v, u] #rgb.getpixel((u, v))
+            Z = depth[v, u] / scale
+            if Z == 0: continue
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
+            points.append("%f %f %f %d %d %d 0\n" % (X, Y, Z, color[0], color[1], color[2]))
+    file = open(ply_file, "w")
+    file.write('''ply
+            format ascii 1.0
+            element vertex %d
+            property float x
+            property float y
+            property float z
+            property uchar red
+            property uchar green
+            property uchar blue
+            property uchar alpha
+            end_header
+            %s
+            ''' % (len(points), "".join(points)))
+    file.close()
+    print("save ply, fx:{}, fy:{}, cx:{}, cy:{}".format(fx, fy, cx, cy))
 
 def find_ref(imgs, gts, poses, K, gap):
     if len(imgs) < 3 * gap:
@@ -144,18 +186,41 @@ def refine_geo(solver, confCal, batches, iters, gap):
         cur_depth, cur_normal = batch["init_depth"].unsqueeze(0).cuda(), batch["init_normal"].cuda()
         tgt_img = torch.from_numpy(batch["tgt_img"]).float().permute(2,0,1).unsqueeze(0).cuda()
         for i in range(iters):
-            cur_depth, cur_normal = solver(cur_depth, cur_normal, tgt_img, confD, confN, batch["intrinsics_t"].cuda())
+            # from pdb import set_trace; set_trace()
+            # hand_designed kernel
+            x, y = np.arange(-1,2), np.arange(-1,2)
+            x, y = np.meshgrid(x,y)
+            xy = np.stack([x,y],-1).reshape(-1,1)
+            xy = torch.tensor(xy).cuda(tgt_img.device)
         
+            tmp = tgt_img.new_ones(18, 480 *640) * xy
+            check_offsets = [1,3,5,10]
+            offsets = []
+            for offset in check_offsets:
+                offsets.append(offset * tmp)
+            offsets = torch.cat(offsets, 0)
+            c = offsets.shape[0]
+            offsets = offsets.reshape(1, c, 480 , 640)
+            try:
+                cur_depth, cur_normal = solver(cur_depth, cur_normal, tgt_img, confD, confN, batch["intrinsics_t"].cuda(), offsets = offsets)
+            except:
+                cur_depth, cur_normal = solver(cur_depth, cur_normal, tgt_img, confD, confN, batch["intrinsics_t"].cuda())
+
         depths.append(cur_depth[0,0].cpu().numpy())
         normals.append(cur_normal[0].permute(1,2,0).cpu().numpy())
         depth_gts.append(batch["gt_depth"])
         
     return depths, normals, depth_gts
 
-def vis_geo(save_dir, depths, normals):
+
+def vis_geo(save_dir, depths, normals, imgs=None, K=None):
     for i in range(len(depths)):
         vis_depth(save_dir, str(i), depths[i])
         vis_normal(save_dir, str(i), normals[i])
+        if imgs is not None and K is not None:
+            ply_name = save_dir + f'/{i}_ply.ply'
+            generate_pointcloud(imgs[i], depths[i],ply_name, K)
+
 
 def compute_seq_error(depths, gts, test_errors):
     assert len(depths) == len(gts)
@@ -171,8 +236,13 @@ def main(args, cfg):
     print("=> creating model")
 
     mvdnet = MVDNet_conf(cfg).cuda()
-    solver = Solver(h=cfg.input_size[0], w=cfg.input_size[1], check_offsets=cfg.check_offsets, alpha1=cfg.solver_alpha1, \
-                    alpha2=cfg.solver_alpha2, sigma1=cfg.solver_sigma1, sigma2=cfg.solver_sigma2)
+    try:
+        solver = Solver(h=cfg.input_size[0], w=cfg.input_size[1], check_offsets=cfg.check_offsets, alpha1=cfg.solver_alpha1, \
+                        alpha2=cfg.solver_alpha2, sigma1=cfg.solver_sigma1, sigma2=cfg.solver_sigma2)
+    except:
+        solver = Solver(h=cfg.input_size[0], w=cfg.input_size[1], alpha1=cfg.solver_alpha1, \
+                        alpha2=cfg.solver_alpha2, sigma1=cfg.solver_sigma1, sigma2=cfg.solver_sigma2)
+
     confCal = calConf(1, h=cfg.input_size[0], w=cfg.input_size[1])
     mvdnet.init_weights()
     
@@ -183,35 +253,65 @@ def main(args, cfg):
     else:
         print("Must provide a checkpoint model")
         raise NotImplementedError
-    
+    save_path = path.Path(cfg.pretrained_mvdn).dirname().dirname() / 'eval_vis'
+
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    save_path_inital = path.Path(cfg.pretrained_mvdn).dirname().dirname() / 'eval_visinital'
+
+    if not os.path.exists(save_path_inital):
+        os.makedirs(save_path_inital)
     cudnn.benchmark = True
     mvdnet = torch.nn.DataParallel(mvdnet)
 
     print("=> evaluate model on scannet test set '{}'".format(args.data_dir))
     test_error_names = ['abs_rel','abs_diff','sq_rel','rms','log_rms','a1','a2','a3']
-    test_errors = AverageMeter(i=len(test_error_names))
+    test_errors_init = AverageMeter(i=len(test_error_names))
+    test_errors_slover = AverageMeter(i=len(test_error_names))
     
     seq_names = sorted(os.listdir(args.data_dir))
     total_num = 0
+    read_nums = 5
     for seq in seq_names:
+        # from pdb import set_trace; set_trace()
         seq_dir = os.path.join(args.data_dir, seq)
         if not os.path.isdir(seq_dir):
             continue
         imgs, gt_depths, poses, K = read_folder(seq_dir, cfg.input_size)
+        imgs, gt_depths, poses = imgs[:read_nums], gt_depths[:read_nums], poses[:read_nums]
         batches = find_ref(imgs, gt_depths, poses, K, gap=cfg.reference_gap)
         total_num += len(batches)
 
         print("=> predict initial geometry")
         new_batches = get_initial_geo(mvdnet, batches)
         print("=> refine geometry")
+        # inital depth
+        final_depths = [item['init_depth'].cpu().numpy() for item in new_batches]
+        gts = [item['gt_depth'] for item in new_batches]
+        final_normals = [item['init_normal'].cpu().numpy() for item in new_batches]
+
+        final_depths, gts, final_normals = np.concatenate(final_depths, axis=0),  np.stack(gts, axis=0),  np.concatenate(final_normals, axis=0)
+        #
+        # from pdb import set_trace; set_trace()
+        # final_depths, final_normals, gts = refine_geo(solver, confCal, new_batches, cfg.refine_iter, cfg.reference_gap)
+        vis_geo(save_path_inital, final_depths[:read_nums], final_normals[:read_nums].transpose(0,2,3,1), imgs[:read_nums], K)
+
+        print("=> inital loss")
+        compute_seq_error(final_depths, gts, test_errors_init)
+        test_errors_init.show_avgerrors()
+
+        # solver = Solver(h=cfg.input_size[0], w=cfg.input_size[1], check_offsets=cfg.check_offsets, alpha1=cfg.solver_alpha1, alpha2=cfg.solver_alpha2, sigma1=cfg.solver_sigma1, sigma2=cfg.solver_sigma2)
+        # from pdb import set_trace; set_trace()
+        # test_errors_slover = AverageMeter(i=len(test_error_names))
         final_depths, final_normals, gts = refine_geo(solver, confCal, new_batches, cfg.refine_iter, cfg.reference_gap)
-        print("=> calculate loss")
-        compute_seq_error(final_depths, gts, test_errors)
-        print(seq)
-        print(len(batches))
-    print("Total test num: " + str(total_num))
-    print(test_error_names)
-    print(test_errors.avg)
+        vis_geo(save_path, final_depths[:read_nums], final_normals[:read_nums], imgs[:read_nums], K)
+
+        print("=> after slover loss")
+        compute_seq_error(final_depths, gts, test_errors_slover)
+        # print(seq)
+        # print(len(batches))
+        test_errors_slover.show_avgerrors()
 
 
 if __name__ == '__main__':

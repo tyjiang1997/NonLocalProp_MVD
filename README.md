@@ -44,7 +44,9 @@ This includes 1. resize the color images to 480x640 resolution 2. sample the dat
 
 ### Run evaluation
 ```bash
-python eval_scannet.py --data_dir /path/to/processed/scannet/test/split/ --config ./configs/test_scannet.yaml
+python eval_scannet.py --data_dir /6t/jty/scannet/scans_test_sample --config ./configs/test_scannet.yaml
+python eval_scannetnlspn.py --data_dir /6t/jty/scannet/scans_test_sample --config ./configs/test_scannet_nlspn.yaml
+python eval_scannetprop.py --data_dir /6t/jty/scannet/scans_test_sample --config ./configs/test_scannetprop.yaml
 ```
 
 ## Train

@@ -1,20 +1,27 @@
+# env realted
+cuda: ['0']
+
 cfg_name: "scannet_mvdnet"
 
 # dataset related
 dataset: 'scannet'
-dataset_path: '/mnt/bd/zw-volume/data/scannet/'
+dataset_path: '/6t/jty/scannet/'
 num_workers: 16
-train_list: './data/train.txt'
-test_list: './data/test.txt'
+train_list: './data/train1.txt'
+test_list: './data/val1.txt'
+dataloader: 'SequenceFolder'
 
 # training related
-batch_size: 24
-epochs: 10
+batch_size: 4
+epochs: 35
 learning_rate: 0.0002
 momentum: 0.9
 beta: 0.999
 weight_decay: 0
 print_freq: 20
+# training utils used
+depth_fliter_by_multi_views: {use: False, valid_threshod: 0.1 }
+training_weight_schedule: False
 
 # model related
 model_name: 'MVDNet_joint'
@@ -29,7 +36,7 @@ solver_alpha2: 1.0
 solver_sigma1: 50.0
 solver_sigma2: 5.0
 refine_iter: 5 # iterations of solver
-pretrained_mvdn: 'results/stage1/checkpoints/mvdnet_14_checkpoint.pth.tar'
+pretrained_mvdn: "/home/jty/mvs/idn-solver/results/stage1/checkpoints/checkpoint.pth.tar"
 
 # loss related
 d_weight: 0.7 # depth loss weight of the first term
@@ -39,7 +46,7 @@ dc_weight: 0.1 #0.2 # depth confidence loss weight
 
 # logging related
 log_mode: 'summary' # or 'full'
-output_dir: './results/stage2/'
+output_dir: './resultsnew/stage2/'
 save_samples: True
 
 

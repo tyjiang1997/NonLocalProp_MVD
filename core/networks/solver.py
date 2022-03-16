@@ -4,6 +4,9 @@ import torch.nn as nn
 import numpy as np
 import pdb
 import cv2
+import sys
+sys.path.append('/home/jty/mvs/idn-solver/')
+from utils import depth2normal
 
 class Solver(nn.Module):
     def __init__(self, h, w, check_offsets=[1,3,5], alpha1=10.0, alpha2=10.0, sigma1=20.0, sigma2=3.0):
@@ -25,6 +28,7 @@ class Solver(nn.Module):
     def propagate_axis(self, depth, normal, rgb, conf, offset, K_inv, axis='ud'):
         # Up, down, left and right directions
         # depth & conf: [b, 1, h, w], rgb & normal: [b, 3, h, w], K_inv: [b, 3, 3]
+       
         b = depth.shape[0]
         xy_homo_ = self.xy_homo.repeat(b,1,1) # [b, 3, h*w]
         xy_3d = torch.matmul(K_inv, xy_homo_).reshape(b, 3, self.h, self.w)
@@ -38,6 +42,7 @@ class Solver(nn.Module):
             denom = torch.sum(normal * torch.matmul(K_inv, xy_homo_ref).reshape(b,3,self.h,self.w), dim=1, keepdim=True)
             d1_p =  (nom / (denom + 1e-18)).clamp(0.01, 10.0)
             d1 = torch.cat([depth[:,:,:offset,:], d1_p[:,:,:-offset,:]], 2)
+            
             # Down
             xy_homo_ref = xy_homo_.clone()
             xy_homo_ref[:,1,:] = xy_homo_ref[:,1,:] - offset
@@ -46,6 +51,7 @@ class Solver(nn.Module):
             d2 = torch.cat([d2_p[:,:,offset:, :], depth[:,:,-offset:,:]], 2)
             conf1, conf2 = torch.cat([filler1, conf[:,:,:-offset,:]], 2), torch.cat([conf[:,:,offset:, :], filler1], 2)
             rgb1, rgb2 = torch.cat([filler2, rgb[:,:,:-offset,:]], 2), torch.cat([rgb[:,:,offset:, :], filler2], 2)
+            # from pdb import set_trace; set_trace()
         else:
             filler1, filler2 = torch.zeros((b, 1, self.h, offset)), torch.zeros((b, 3, self.h, offset))
             filler1, filler2 = filler1.to(depth.get_device()), filler2.to(depth.get_device())
@@ -75,6 +81,7 @@ class Solver(nn.Module):
         if profiler is not None:
             profiler.report_process('checkerboard propagate prev')
         for i in range(len(self.check_offsets)):
+            
             offset = self.check_offsets[i]
             d1, d2, conf1, conf2, rgb1, rgb2 = self.propagate_axis(depth, normal, rgb, conf, offset, K_inv, axis='ud')
             propagated_depth.append(d1)
@@ -95,7 +102,7 @@ class Solver(nn.Module):
             propagated_rgb.append(rgb2)
             distance.append(offset)
             distance.append(offset)
-        
+        # from pdb import set_trace; set_trace()
         propagated_depth, propagated_conf, propagated_rgb = torch.stack(propagated_depth, 1), torch.stack(propagated_conf, 1), torch.stack(propagated_rgb, 1)
         distance = torch.from_numpy(np.stack(distance, -1)).float().to(depth.get_device())
         return propagated_depth, propagated_conf, propagated_rgb, distance
@@ -144,6 +151,7 @@ class Solver(nn.Module):
         b = depth.shape[0]
         K_inv = torch.inverse(K.cpu()).to(depth.get_device())
         checkerboard_depth, checkerboard_conf, checkerboard_rgb, checkerboard_dis = self.checkerboard_propagate(depth, normal, image, conf*confN, K_inv, profiler=profiler)
+        # from pdb import set_trace; set_trace()
         colorweights = image.unsqueeze(1).repeat(1,checkerboard_rgb.shape[1],1,1,1) - checkerboard_rgb
         colorweights = torch.exp(-torch.sum(torch.pow(colorweights, 2), 2) / self.sigma1).unsqueeze(2).detach()
         spatialweights = torch.exp(-checkerboard_dis / self.sigma2).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).repeat(b,1,self.h,self.w).detach()
@@ -165,7 +173,6 @@ class Solver(nn.Module):
         checkerboard_dconf = checkerboard_dconf * colorweights * spatialweights.unsqueeze(2)
         residual = points.unsqueeze(1) - checkerboard_points
         checkerboard_dconf = checkerboard_dconf.squeeze(2) * conf
-
 
         A11 = self.alpha2 * confN + (checkerboard_dconf * (residual[:,:,0,:,:])**2).sum(1, keepdim=True)
         A12 = (checkerboard_dconf * residual[:,:,0,:,:] * residual[:,:,1,:,:]).sum(1, keepdim=True)
@@ -199,29 +206,36 @@ def normal2color(normal_map):
 if __name__ == '__main__':
     print('Test case...')
     # A whole plain 3D plane filling the incorrect values
-    img = cv2.imread('../test_color.png')
-    depth = cv2.imread('../test_depth.png', -1)
+    img = cv2.imread('/6t/jty/scannet/scannet_nas/train/scene0000_00/color/0000.jpg')
+    depth = np.load('/6t/jty/scannet/scannet_nas/train/scene0000_00/depth/0000.npy').astype(np.float32)
     depth_f = cv2.medianBlur(depth, 5)
     depth_f = depth_f / 5000.0
     K = np.array([[535.4, 0.0, 320.1], [0.0, 539.2, 247.6], [0.0, 0.0, 1.0]])
-    normal = depth2normal(torch.from_numpy(depth_f).float().unsqueeze(0), torch.from_numpy(K).float())
+    K = K[np.newaxis, ...]
+    depth_f = depth_f[np.newaxis, ...]
+    normal = depth2normal(torch.from_numpy(depth_f).float().unsqueeze(0), torch.from_numpy(np.linalg.inv(K)).float())
     normal = normal + 1e-16
     normal_img = normal[0].numpy()
-    cv2.imwrite('../test_normal.png', normal2color(normal_img))
+    cv2.imwrite('/home/jty/mvs/idn-solver/vis/test_normal.png', normal2color(normal_img).transpose(1,2,0))
+    # 
 
     solver = Solver(h=480, w=640, check_offsets=[1,2,3,5,7,20], alpha1=5.0, alpha2=5.0, sigma1=1000.0, sigma2=10.0)
     iter_ = 5
     conf = np.where(depth_f > 0.001, 1.0, 0.01)
-    depth_var = torch.from_numpy(depth_f).unsqueeze(-1).float().cuda()
-    normal_var = normal[0].float().cuda()
-    img_var = torch.from_numpy(img).float().cuda()
-    conf_var = torch.from_numpy(conf).float().cuda().unsqueeze(-1)
+    depth_var = torch.from_numpy(depth_f).unsqueeze(1).float().cuda()
+    normal_var = normal.float().cuda()
+    img_var = torch.from_numpy(img).float().cuda().permute(2,0,1).unsqueeze(0)
+    conf_var = torch.from_numpy(conf).float().cuda().unsqueeze(-1).permute(0,3,1,2)
     K_var = torch.from_numpy(K).float().cuda()
     for i in range(iter_):
         if i == 0:
+            
+            # (depth, normal, image, conf, confN, K, profiler=None):
+            # depth: [B, 1, H, W], normal: [B, 3, H, W], image: [B, 3, H, W], conf: depth confidence [B, 1, H, W], confN: normal confidence
             updated_depth, updated_normal = solver(depth_var, normal_var, img_var, conf_var, conf_var, K_var)
         else:
             updated_depth, updated_normal = solver(updated_depth, updated_normal, img_var, conf_var, conf_var, K_var)
-        cv2.imwrite('../test_depth'+str(i)+'.png', (updated_depth.detach().cpu().numpy()*5000.0).astype(np.uint16))
-        cv2.imwrite('../test_normal'+str(i)+'.png', normal2color(updated_normal.detach().cpu().numpy()))
+        # from pdb import set_trace; set_trace()
+        cv2.imwrite('/home/jty/mvs/idn-solver/vis/test_depth'+str(i)+'.png', (updated_depth.detach().cpu().numpy()*100.0)[0,0].astype(np.uint8))
+        cv2.imwrite('/home/jty/mvs/idn-solver/vis/test_normal'+str(i)+'.png', normal2color(updated_normal.detach().cpu().numpy())[0].transpose(1,2,0))
 

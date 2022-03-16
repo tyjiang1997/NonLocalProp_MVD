@@ -119,8 +119,8 @@ def inverse_warp_d(feat, depth, pose, intrinsics, intrinsics_inv, padding_mode='
     src_pixel_coords = cam2pixel(cam_coords, proj_cam_to_src_pixel[:,:,:3], proj_cam_to_src_pixel[:,:,-1:], padding_mode)  # [B,D,H,W,1,3]
 
     
-    projected_feat = torch.nn.functional.grid_sample(feat.unsqueeze(2), src_pixel_coords.view(batch_size,src_pixel_coords.size(1),feat_height,-1,3), padding_mode=padding_mode)
-    #projected_feat = torch.nn.functional.grid_sample(feat.unsqueeze(2), src_pixel_coords.view(batch_size,src_pixel_coords.size(1),feat_height,-1,3), padding_mode=padding_mode, align_corners=True)
+    projected_feat = torch.nn.functional.grid_sample(feat.unsqueeze(2), src_pixel_coords.view(batch_size,src_pixel_coords.size(1),feat_height,-1,3), padding_mode=padding_mode,align_corners=True)
+    #projected_feat = torch.nn.functional.grid_sample(feat.unsqueeze(2), src_pixel_coords.view(batch_size,src_pixel_coords.size(1),feat_height,-1,3), padding_mode=padding_mode, align_corners=True,align_corners=True)
 
     return projected_feat.view(batch_size,ch,projected_feat.size(2),feat_height,feat_width,-1)#[B,CH,D,H,W,1]
 

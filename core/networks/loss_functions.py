@@ -25,6 +25,30 @@ def compute_errors_test(gt, pred):
 
     return abs_rel, abs_diff, sq_rel, rmse, rmse_log, a1, a2, a3
 
+
+def compute_errors_test_batch(gt, pred):
+    gt = gt.numpy()
+    pred = pred.numpy()
+    thresh = np.maximum((gt / pred), (pred / gt))
+
+    a1 = (thresh < 1.25   ).mean()
+    a2 = (thresh < 1.25 ** 2).mean()
+    a3 = (thresh < 1.25 ** 3).mean()
+    
+    rmse = (gt - pred) ** 2
+    rmse = np.sqrt(rmse.mean())
+
+    rmse_log = (np.log(gt) - np.log(pred)) ** 2
+    rmse_log = np.sqrt(rmse_log.mean())
+
+    abs_diff = np.mean(np.abs(gt - pred))
+    abs_rel = np.mean(np.abs(gt - pred) / gt)
+
+    sq_rel = np.mean(((gt - pred)**2) / gt)
+
+    return abs_rel, abs_diff, sq_rel, rmse, rmse_log, a1, a2, a3
+
+
 def compute_errors_numpy(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
     a1 = (thresh < 1.25   ).mean()

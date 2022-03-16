@@ -1,4 +1,6 @@
+import imp
 import os
+from re import I
 import time
 import csv
 import numpy as np
@@ -6,20 +8,23 @@ from path import Path
 import argparse
 import matplotlib.pyplot as plt
 from tensorboardX import SummaryWriter
-
+import cv2
 import torch
 import torch.nn.functional as F
 from core.dataset import custom_transforms
 from core.networks.MVDNet_conf import MVDNet_conf
 from core.networks.MVDNet_joint import MVDNet_joint
-
+from core.networks.MVDNet_nslpn import MVDNet_nslpn
+from core.networks.MVDNet_prop import  MVDNet_prop
+from core.utils.inverse_warp_d import inverse_warp_d, pixel2cam
 from core.utils.utils import load_config_file, save_checkpoint, adjust_learning_rate
 from core.networks.loss_functions import compute_errors_test, compute_angles, cross_entropy
 
 from core.utils.logger import AverageMeter
-from core.dataset.data_loader import SequenceFolder
+from core.dataset import SequenceFolder, NoisySequenceFolder
 
 def main(cfg):
+    os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(cfg.cuda) 
     global n_iter
     save_path = Path(cfg.output_dir)
     if not os.path.exists(save_path):
@@ -45,18 +50,22 @@ def main(cfg):
     print("=> fetching scenes in '{}'".format(cfg.dataset_path))
     
     if cfg.dataset == 'scannet':
-        train_set = SequenceFolder(cfg.dataset_path, transform=train_transform, ttype=cfg.train_list)        
-        test_set = SequenceFolder(cfg.dataset_path, transform=valid_transform, ttype=cfg.test_list)
+        if cfg.dataloader == 'NoisySequenceFolder':
+            train_set = NoisySequenceFolder(cfg.dataset_path, transform=train_transform, ttype=cfg.train_list)        
+            test_set = NoisySequenceFolder(cfg.dataset_path, transform=valid_transform, ttype=cfg.test_list)
+        else:
+            train_set = SequenceFolder(cfg.dataset_path, transform=train_transform, ttype=cfg.train_list)        
+            test_set = SequenceFolder(cfg.dataset_path, transform=valid_transform, ttype=cfg.test_list) 
     else:
         raise NotImplementedError
-
+    train_set[0]
     train_set.samples = train_set.samples[:len(train_set) - len(train_set)%cfg.batch_size]
 
     print('{} samples found in {} train scenes'.format(len(train_set), len(train_set.scenes)))
     print('{} samples found in {} test scenes'.format(len(test_set), len(test_set.scenes)))
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=1, shuffle=False,
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=cfg.batch_size, shuffle=False,
         num_workers=cfg.num_workers, pin_memory=True)
 
     epoch_size = len(train_loader)
@@ -67,6 +76,10 @@ def main(cfg):
         mvdnet = MVDNet_conf(cfg).cuda()
     elif cfg.model_name == 'MVDNet_joint':
         mvdnet = MVDNet_joint(cfg).cuda()
+    elif cfg.model_name == 'MVDNet_nslpn':
+        mvdnet = MVDNet_nslpn(cfg).cuda()
+    elif cfg.model_name == 'MVDNet_prop':
+        mvdnet = MVDNet_prop(cfg).cuda()
     else:
         raise NotImplementedError
     
@@ -82,12 +95,13 @@ def main(cfg):
                                      weight_decay=cfg.weight_decay)
 
     torch.backends.cudnn.benchmark = True
-    mvdnet = torch.nn.DataParallel(mvdnet)
+    if len(cfg.cuda) > 1:
+        mvdnet = torch.nn.DataParallel(mvdnet, device_ids=[int(id) for id in cfg.cuda])
 
     print(' ==> setting log files')
     with open(save_path/'log_summary.txt', 'w') as csvfile:
         writer = csv.writer(csvfile, delimiter='\t')
-        writer.writerow(['train_loss', 'validation_abs_rel', 'validation_abs_diff','validation_sq_rel', 'validation_a1', 'validation_a2', 'validation_a3', 'mean_angle_error'])
+        writer.writerow(['train_loss', 'validation_abs_rel', 'validation_abs_diff','validation_sq_rel', 'validation_rms', 'validation_log_rms', 'validation_a1', 'validation_a2','validation_a3'])
 
     print(' ==> main Loop')
     for epoch in range(cfg.epochs):
@@ -95,7 +109,7 @@ def main(cfg):
 
         # train for one epoch
         train_loss = train_epoch(cfg, train_loader, mvdnet, optimizer, epoch_size, training_writer, epoch)
-        
+                
         errors, error_names = validate_with_gt(cfg, test_loader, mvdnet, epoch, output_writers)
         for error, name in zip(errors, error_names):
             training_writer.add_scalar(name, error, epoch)
@@ -104,7 +118,7 @@ def main(cfg):
         decisive_error = errors[0]
         with open(save_path/'log_summary.txt', 'a') as csvfile:
             writer = csv.writer(csvfile, delimiter='\t')
-            writer.writerow([train_loss, decisive_error, errors[1], errors[2], errors[3], errors[4], errors[5], errors[6]])
+            writer.writerow([train_loss, decisive_error, errors[1], errors[2], errors[3], errors[4], errors[5], errors[6],  errors[7]])
         save_checkpoint(os.path.join(save_path, 'checkpoints'), {'epoch': epoch + 1, 'state_dict': mvdnet.module.state_dict()},
             epoch, file_prefixes = ['mvdnet'])
         
@@ -124,7 +138,7 @@ def train_epoch(cfg, train_loader, mvdnet, optimizer, epoch_size, train_writer, 
     print("Training")
     end = time.time()
 
-    for i, (tgt_img, ref_imgs, gt_nmap, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths) in enumerate(train_loader):
+    for i, (tgt_img, ref_imgs, gt_nmap, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths, tgt_id) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
         tgt_img_var = tgt_img.cuda()
@@ -135,18 +149,54 @@ def train_epoch(cfg, train_loader, mvdnet, optimizer, epoch_size, train_writer, 
         intrinsics_inv_var = intrinsics_inv.cuda()
         tgt_depth_var = tgt_depth.cuda()
 
+        ref_dep_var = [ref_dep.cuda() for ref_dep in ref_depths]
+        ref_depths = torch.stack(ref_dep_var,1)
         # compute output
         pose = torch.cat(ref_poses_var,1)
 
         # get mask
         mask = (tgt_depth_var <= 10.0) & (tgt_depth_var >= 0.5) & (tgt_depth_var == tgt_depth_var)
-        mask.detach_()
         if mask.any() == 0:
             continue
+        
+        if cfg.depth_fliter_by_multi_views['use']:
+            valid_threshod = cfg.depth_fliter_by_multi_views['valid_threshod']
+            multi_view_mask = tgt_depth_var.new_ones(tgt_depth_var.shape).bool()
+            views = ref_depths.shape[1]
+            for viw in range(views):
+                warp_rerdep = inverse_warp_d(ref_depths[:,viw:viw+1], ref_depths[:,viw:viw+1], pose[:,viw], intrinsics_var, intrinsics_inv_var)
+                warp_rerdep = warp_rerdep.squeeze()
+
+                diff_depth = torch.abs(warp_rerdep - tgt_depth_var)
+                max_diff = diff_depth.max()
+                diff_depth = diff_depth / (max_diff + 1e-8)
+                multi_view_mask &= (diff_depth < valid_threshod)
+
+                # ids = 0
+                # tht_vis = tgt_depth[ids].cpu().numpy()
+                # ref_vis = warp_rerdep[ids].cpu().numpy()
+                # diff_vis =  diff_depth[ids].cpu().numpy()
+
+                # max_ = tht_vis.max()
+                # tht_vis = tht_vis *255 / max_
+                # ref_vis = ref_vis *255 / max_
+                # diff_vis = diff_vis *255 / max_
+                # cv2.imwrite('/home/jty/mvs/idn-solver/vis/tdtdep.png', tht_vis)
+                # cv2.imwrite('/home/jty/mvs/idn-solver/vis/refdep.png', ref_vis)
+                # cv2.imwrite('/home/jty/mvs/idn-solver/vis/diffdep.png', diff_vis)
+                # from pdb import set_trace; set_trace()
+            mask &= multi_view_mask
+
+        mask.detach_()
+
         
         if cfg.model_name == 'MVDNet_conf':
             outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, intrinsics_var, intrinsics_inv_var)
         elif cfg.model_name == 'MVDNet_joint':
+            outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, tgt_depth_var, gt_nmap_var, intrinsics_var, intrinsics_inv_var)
+        elif cfg.model_name == 'MVDNet_nslpn':
+            outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, intrinsics_var, intrinsics_inv_var)
+        elif cfg.model_name == 'MVDNet_prop':
             outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, tgt_depth_var, gt_nmap_var, intrinsics_var, intrinsics_inv_var)
         else:
             raise NotImplementedError
@@ -156,9 +206,12 @@ def train_epoch(cfg, train_loader, mvdnet, optimizer, epoch_size, train_writer, 
         dconf, nconf = outputs[-2], outputs[-1]
         
         # Loss
+        
         d_loss = cfg.d_weight * F.smooth_l1_loss(depth0[mask], tgt_depth_var[mask]) + \
             F.smooth_l1_loss(depth1[mask], tgt_depth_var[mask])
+
         gt_dconf = 1.0 - cfg.conf_dgamma * torch.abs(depth0 - tgt_depth_var) / (tgt_depth_var + 1e-6)
+        
         gt_dconf = torch.clamp(gt_dconf, 0.01, 1.0).detach_()
         dconf_loss = cross_entropy(dconf[mask], gt_dconf[mask])
         
@@ -214,7 +267,7 @@ def validate_with_gt(cfg, test_loader, mvdnet, epoch, output_writers=[]):
 
     end = time.time()
     with torch.no_grad(): 
-        for i, (tgt_img, ref_imgs, gt_nmap, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths) in enumerate(test_loader):
+        for i, (tgt_img, ref_imgs, gt_nmap, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths, tgt_id) in enumerate(test_loader):
             tgt_img_var = tgt_img.cuda()
             ref_imgs_var = [img.cuda() for img in ref_imgs]
             gt_nmap_var = gt_nmap.cuda()
@@ -230,6 +283,10 @@ def validate_with_gt(cfg, test_loader, mvdnet, epoch, output_writers=[]):
             if cfg.model_name == 'MVDNet_conf':
                 outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, intrinsics_var, intrinsics_inv_var)
             elif cfg.model_name == 'MVDNet_joint':
+                outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, tgt_depth_var, gt_nmap_var, intrinsics_var, intrinsics_inv_var)
+            elif cfg.model_name == 'MVDNet_nslpn':
+                outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, intrinsics_var, intrinsics_inv_var)
+            elif cfg.model_name == 'MVDNet_prop':
                 outputs = mvdnet(tgt_img_var, ref_imgs_var, pose, tgt_depth_var, gt_nmap_var, intrinsics_var, intrinsics_inv_var)
             else:
                 raise NotImplementedError
@@ -271,7 +328,10 @@ def validate_with_gt(cfg, test_loader, mvdnet, epoch, output_writers=[]):
                 output_dir = Path(os.path.join(cfg.output_dir, 'vis'))
                 if not os.path.isdir(output_dir):
                     os.mkdir(output_dir)
-                plt.imsave(output_dir/'{:04d}_depth.png'.format(i), output_depth.numpy()[0], cmap='rainbow')
+                output_depth = output_depth.numpy()
+                for picid, imgsave in zip(tgt_id, output_depth):
+                    plt.imsave(output_dir/ f'{picid}_depth.png',imgsave, cmap='rainbow')
+
     return test_errors.avg, test_error_names
 
 

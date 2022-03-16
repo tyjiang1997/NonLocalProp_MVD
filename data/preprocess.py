@@ -22,7 +22,7 @@ def copy_all_with_gap(src_dir, tgt_dir, gap):
     i = 0
     for i in range(len(imgs)):
         if img_name[i] % gap == 0:
-            command = 'cp ' + os.path.join(src_dir, str(img_name[i]) + img_ext) + ' ' + os.path.join(tgt_dir, "%04d"%(img_name[i]) + img_ext)
+            command = 'cp ' + os.path.join(src_dir, '%04d' % img_name[i] + img_ext) + ' ' + os.path.join(tgt_dir, "%04d"%(img_name[i]) + img_ext)
             os.system(command)
 
 def copy_resize_all_with_gap(src_dir, tgt_dir, gap):
@@ -34,7 +34,8 @@ def copy_resize_all_with_gap(src_dir, tgt_dir, gap):
     i = 0
     for i in range(len(imgs)):
         if img_name[i] % gap == 0:
-            image = cv2.imread(os.path.join(src_dir, str(img_name[i]) + img_ext))
+            image = cv2.imread(os.path.join(src_dir,  '%04d' % img_name[i] + img_ext))
+            # from pdb import set_trace; set_trace()
             image_r = cv2.resize(image, (640,480))
             save_name = os.path.join(tgt_dir, "%04d"%(img_name[i]) + img_ext)
             cv2.imwrite(save_name, image_r)

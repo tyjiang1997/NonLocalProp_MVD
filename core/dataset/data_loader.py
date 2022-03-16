@@ -1,3 +1,5 @@
+from multiprocessing.spawn import import_main_path
+from signal import set_wakeup_fd
 import numpy as np
 from path import Path
 import random
@@ -22,8 +24,8 @@ class SequenceFolder(torch.utils.data.Dataset):
 
 		scene_list_path = ttype
 		self.scene_list_path = scene_list_path[:-4]
-		fold_root = 'scans_test_sample' if 'test' in ttype else 'scannet_nas' 
-		#fold_root = 'scannet_nas'
+		# fold_root = 'scans_test_sample' if 'test' in ttype else 'scannet_nas' 
+		fold_root = 'scannet_nas'
 		scenes = [self.root/fold_root/folder[:-1] for folder in open(scene_list_path)]
 		self.ttype = ttype
 		self.scenes = sorted(scenes)
@@ -70,7 +72,8 @@ class SequenceFolder(torch.utils.data.Dataset):
 					normal = ""
 				else:
 					depth = os.path.join(scene, "depth", "%04d.npy" % idx)
-					normal = os.path.join(scene, "normal", "%04d_normal.npy" % idx)
+					spilt_dir, sceneid = scene.split('/')[-2:]
+					normal = os.path.join(scene.dirname().dirname(), "normals", spilt_dir, sceneid, "%04d_normal.npy" % idx)
 
 				pose_tgt = np.loadtxt(os.path.join(scene, "pose", "%04d.txt" % idx))
 
@@ -180,8 +183,71 @@ class SequenceFolder(torch.utils.data.Dataset):
 		else:
 			intrinsics = np.copy(sample['intrinsics'])
 		intrinsics_inv = np.linalg.inv(intrinsics)
-		return tgt_img, ref_imgs, tgt_normal, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths
+		tgt_id = sample['tgt'].split('/')[-1][:4]
+
+		return tgt_img, ref_imgs, tgt_normal, ref_poses, intrinsics, intrinsics_inv, tgt_depth, ref_depths, tgt_id
 
 
 	def __len__(self):
 		return len(self.samples)
+
+
+if __name__ == "__main__":
+
+	dataset = SequenceFolder("/6t/jty/scannet", './data/train1.txt')
+
+	item = dataset[20]
+	from pdb import set_trace; set_trace()
+
+	stagekey = ['proj_matrices', 'depth', 'mask']
+	for key in stagekey:
+		item[key] =  item[key]['stage3']
+
+	# test homography here
+	print(item.keys())
+	print("imgs", item["imgs"].shape)
+	print("depth", item["depth"].shape)
+	print("depth_values", item["depth_values"].shape)
+	print("mask", item["mask"].shape)
+
+	ref_img = item["imgs"][0].transpose([1, 2, 0])
+	# from pdb import set_trace; set_trace()
+	src_imgs = [item["imgs"][i].transpose([1, 2, 0]) for i in range(1, 5)]
+	ref_proj_mat = item["proj_matrices"][0]
+	src_proj_mats = [item["proj_matrices"][i] for i in range(1, 5)][-1]
+	mask = item["mask"]
+	depth = item["depth"]
+	ref_proj_mat_new, src_proj_mats_new = ref_proj_mat[0].copy(), src_proj_mats[0].copy()
+
+	ref_proj_mat_new[:3,:] = np.matmul(ref_proj_mat[1, :3, :3], ref_proj_mat[0, :3, :4])
+	src_proj_mats_new[:3,:] = np.matmul(src_proj_mats[1, :3, :3], src_proj_mats[0, :3, :4])
+	# from pdb import set_trace; set_trace()
+
+	height = ref_img.shape[0]
+	width = ref_img.shape[1]
+	xx, yy = np.meshgrid(np.arange(0, width), np.arange(0, height))
+	print("yy", yy.max(), yy.min())
+	yy = yy.reshape([-1])
+	xx = xx.reshape([-1])
+	X = np.vstack((xx, yy, np.ones_like(xx)))
+	D = depth.reshape([-1])
+	print("X", "D", X.shape, D.shape)
+
+	X = np.vstack((X * D, np.ones_like(xx)))
+	X = np.matmul(np.linalg.inv(ref_proj_mat_new), X)
+	X = np.matmul(src_proj_mats_new, X)
+	X /= X[2]
+	X = X[:2]
+
+	yy = X[0].reshape([height, width]).astype(np.float32)
+	xx = X[1].reshape([height, width]).astype(np.float32)
+	import cv2
+
+	warped = cv2.remap(src_imgs[-1], yy, xx, interpolation=cv2.INTER_LINEAR)
+	# from pdb import set_trace; set_trace()
+	warped[mask[:, :] < 0.5] = 0
+
+	cv2.imwrite('/home/jty/mvs/cascade-stereo/CasMVSNet/datasets/tmp0.png', ref_img[:, :, ::-1] * 255)
+	cv2.imwrite('/home/jty/mvs/cascade-stereo/CasMVSNet/datasets/tmp1.png', warped[:, :, ::-1] * 255)
+	cv2.imwrite('/home/jty/mvs/cascade-stereo/CasMVSNet/datasets/tmp2.png', src_imgs[-1][:, :, ::-1] * 255)
+	cv2.imwrite('/home/jty/mvs/cascade-stereo/CasMVSNet/datasets/tmp3.png', ref_img[:, :, ::-1] * 255 * 0.5 + warped[:, :, ::-1] * 255 * 0.5)

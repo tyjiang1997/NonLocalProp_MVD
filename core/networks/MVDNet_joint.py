@@ -209,14 +209,14 @@ class MVDNet_joint(nn.Module):
             costs_context[:, :, i, :, :] = self.convs(torch.cat([tgtimg_fea, costt],1)) + costt
 
         # depth regression
-        costs_up = F.interpolate(costs, [self.nlabel,target.size()[2],target.size()[3]], mode='trilinear', align_corners = False)
+        costs_up = F.interpolate(costs, [self.nlabel,target.size()[2],target.size()[3]], mode='trilinear', align_corners = True)
         costs_up = torch.squeeze(costs_up,1)
         pred0 = F.softmax(costs_up,dim=1)
         pred0_r = pred0.clone()
         pred0 = disparityregression(self.nlabel)(pred0)
         depth0 = self.mindepth*self.nlabel/(pred0.unsqueeze(1)+1e-16)
 
-        costss_up = F.interpolate(costs_context, [self.nlabel,target.size()[2],target.size()[3]], mode='trilinear', align_corners = False)
+        costss_up = F.interpolate(costs_context, [self.nlabel,target.size()[2],target.size()[3]], mode='trilinear', align_corners = True)
         costss_up = torch.squeeze(costss_up,1)
         pred = F.softmax(costss_up,dim=1)
         softmax = pred.clone()
@@ -225,7 +225,7 @@ class MVDNet_joint(nn.Module):
         
         # depth confidence network
         # Warped feature, depth prediction, and probability distribution
-        depth_down = F.interpolate(depth1, [tgtimg_fea.size()[2], tgtimg_fea.size()[3]], mode='bilinear', align_corners=False)
+        depth_down = F.interpolate(depth1, [tgtimg_fea.size()[2], tgtimg_fea.size()[3]], mode='bilinear', align_corners=True)
         # Detach the gradient
         depth_down = depth_down.detach()
         for j, ref in enumerate(refs):
@@ -245,7 +245,7 @@ class MVDNet_joint(nn.Module):
         # Joint confidence fusion
         joint_conf = torch.cat([feas_conf, depth_conf, prob_conf], 1)
         joint_conf = self.cconvs_joint(joint_conf)
-        joint_depth_conf = F.interpolate(joint_conf, [target.size()[2], target.size()[3]], mode='bilinear', align_corners=False)
+        joint_depth_conf = F.interpolate(joint_conf, [target.size()[2], target.size()[3]], mode='bilinear', align_corners=True)
         joint_depth_conf = torch.clamp(joint_depth_conf, 0.01, 1.0)
         
         b,ch,d,h,w = cost_in.size()
@@ -297,10 +297,10 @@ class MVDNet_joint(nn.Module):
         nfea_conf = nfea_conf / wc0.size(2)
         normal_conf = self.cconvs_normal(torch.cat([nmap_nor, tgtimg_fea], 1))
         joint_normal_conf = self.cconvs_njoint(torch.cat([nfea_conf, normal_conf], 1))
-        joint_normal_conf = F.interpolate(joint_normal_conf, [target.size()[2], target.size()[3]], mode='bilinear', align_corners=False)
+        joint_normal_conf = F.interpolate(joint_normal_conf, [target.size()[2], target.size()[3]], mode='bilinear', align_corners=True)
         joint_normal_conf = torch.clamp(joint_normal_conf, 0.01, 1.0)
 
-        nmap_out = F.interpolate(nmap, [target.size(2), target.size(3)], mode = 'bilinear', align_corners = False)
+        nmap_out = F.interpolate(nmap, [target.size(2), target.size(3)], mode = 'bilinear', align_corners = True)
         nmap_out = nmap_out.permute(0,2,3,1)
         nmap_out = F.normalize(nmap_out, dim=-1)
         
@@ -313,7 +313,6 @@ class MVDNet_joint(nn.Module):
         
         # refine the depth and normal through solver
         refined_depth, refined_normal = self.refine(depth1, nmap_out, target, gt_depth_conf, gt_normal_conf, intrinsics, iter=self.iter, profiler=None)
-
         refined_normal = refined_normal.permute(0,2,3,1)
         refined_normal = F.normalize(refined_normal, dim=-1)
         refined_normal = -torch.sign(refined_normal[:,:,:,2:]) * refined_normal
